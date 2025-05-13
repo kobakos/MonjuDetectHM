@@ -1,0 +1,88 @@
+augmentation_args:
+augmentation_probabilities:
+criterion:
+  class_weight:
+  - 1.0
+  - 2.0
+  - 1.0
+  - 2.0
+  - 1.0
+  name: bce
+  pos_weight:
+  - 54.0
+  - 96.0
+  - 24.0
+  - 36.0
+  - 36.0
+feature_extractor_args:
+  clip_percentile:
+  - 0.1
+  - 99.9
+  image_size:
+  - 128
+  - 128
+  - 128
+  kernel_sigma_multiplier: 0.2
+  kernel_size_multiplier: 7
+  rescale_factor: 100000
+  resolution_hierarchy: 0
+pretrain: false
+ensemble:
+  method: avg
+  
+metric:
+  name: bce
+model:
+  decoder_channels:
+  - 256
+  - 128
+  - 64
+  - 32
+  - 16
+  detr: false
+  device: cuda
+  drop_path_rate: 0.2
+  drop_rate: 0.1
+  ema:
+    decay: 0.995
+  final_activation: null
+  in_chans: 1
+  n_classes: 5
+  name: resnet50d.ra2_in1k
+  #pretrain_weight_path: /home/kobakos/Kaggle/cryoet/experiments/207_resnet50d.ra2_in1k_20250116/weights/fold_0/best.pth
+  pretrained: false
+  use_2d_enc: false
+  use_timm_3d: false
+postprocessing:
+  method: pooling
+  threshold:
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  weight_center: true
+
+system:
+  seed: 4099
+  device: cuda
+  amp_dtype: fp32
+  infer_amp_dtype: fp16
+  num_workers: 12
+  prefetch_factor: 2
+  log_freq: 10
+  loss_alpha: 0.99
+
+train_loop:
+  n_folds: 4
+  n_epochs: 20
+  early_stop_patience: 15
+  max_grad_norm: 100000
+  gradient_accumulation_steps: 4
+  train_batch_size: 2
+  val_batch_size: 2
+
+paths:
+  train_df_path: train_df.csv
+  train_sub_df_path: train_sub_df.csv
+  val_df_path: val_df.csv

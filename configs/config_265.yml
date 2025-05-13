@@ -1,0 +1,150 @@
+augmentation_args:
+  affine:
+    high:
+    - 1.1
+    - 1.2
+    - 1.2
+    low:
+    - 0.9
+    - 0.8
+    - 0.8
+    rotate: true
+  brightness:
+    high: 0.05
+    low: -0.05
+  contrast:
+    high: 1.2
+    low: 0.8
+  cutmix:
+    max: 96
+    min: 64
+  gamma:
+    high: 1.2
+    low: 0.8
+  noise:
+    high: 0.1
+    low: 0.05
+  shift:
+    d0:
+    - 0
+    - 56
+    d1:
+    - 0
+    - 64
+    d2:
+    - 0
+    - 64
+augmentation_probabilities:
+  contrast: 0.5
+  flip0: 0.5
+  flip1: 0.5
+  flip2: 0.5
+  fuse:
+    cutmix: 0.33333
+    mixup: 0.33333
+  gamma: 0.5
+  noise: 0.5
+  rot12: 0.5
+  shift: 1.0
+criterion:
+  class_weight:
+  - 1.0
+  - 3.0
+  - 2.0
+  - 3.0
+  - 1.0
+  name: bce
+  pos_weight:
+  - 54.0
+  - 96.0
+  - 24.0
+  - 36.0
+  - 36.0
+feature_extractor_args:
+  clip_percentile:
+  - 0.1
+  - 99.9
+  image_size:
+  - 128
+  - 128
+  - 128
+  kernel_sigma_multiplier: 0.2
+  kernel_size_multiplier: 7
+  rescale_factor: 100000
+  resolution_hierarchy: 0
+metric:
+  name: bce
+model:
+  architecture: deeplabv3+
+  decoder_attention_type: scse
+  decoder_channels:
+  - 384
+  - 192
+  - 48
+  - 256
+  - 256
+  detr: false
+  device: cuda
+  drop_path_rate: 0.2
+  drop_rate: 0.1
+  ema:
+    decay: 0.995
+  final_activation: null
+  in_chans: 1
+  n_blocks: 5
+  n_classes: 5
+  name: resnet50d.ra2_in1k
+  output_stride: 16
+  #pretrain_weight_path: /home/kobakos/Kaggle/cryoet/experiments/258_resnet50d.ra2_in1k_20250129/weights/fold_0/best.pth
+  pretrained: true
+  relu2gelu: true
+  use_2d_enc: false
+  use_timm_3d: true
+optimizer:
+  args:
+    lr: 0.01
+    weight_decay: 0.02
+  name: adamw
+postprocessing:
+  method: pooling
+  threshold:
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  weight_center: true
+pretrain: false
+project_name: czii_cryoet
+scheduler:
+  args:
+    lr_min: 5.0e-05
+    t_initial: 17
+    warmup_lr_init: 0.0001
+    warmup_prefix: true
+    warmup_t: 3
+  name: cosine_timm
+
+system:
+  seed: 4099
+  device: cuda
+  amp_dtype: fp32
+  infer_amp_dtype: fp16
+  num_workers: 12
+  prefetch_factor: 2
+  log_freq: 10
+  loss_alpha: 0.99
+
+train_loop:
+  n_folds: 4
+  n_epochs: 20
+  early_stop_patience: 15
+  max_grad_norm: 100000
+  gradient_accumulation_steps: 1
+  train_batch_size: 8
+  val_batch_size: 8
+
+paths:
+  train_df_path: train_df.csv
+  train_sub_df_path: train_sub_df.csv
+  val_df_path: val_df.csv
