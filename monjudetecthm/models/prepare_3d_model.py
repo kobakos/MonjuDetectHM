@@ -227,7 +227,8 @@ def truncate_encoder(encoder, n_blocks):
     encoder_output = nn.Sequential(*encoder_output)
     return encoder_output
     
-from src.models.decoder import DeepLabHeadV3Plus
+from .decoder_deeplab import DeepLabHeadV3Plus
+from .decoder_unet import UnetDecoder
 class TimmSegModel(nn.Module):
     def __init__(self,
             backbone,
@@ -289,7 +290,7 @@ class TimmSegModel(nn.Module):
         #[print(_.shape) for _ in g]
         encoder_channels = [1] + [_.shape[1] for _ in g]
         if architecture == 'unet':
-            self.decoder = smp.decoders.unet.decoder.UnetDecoder(
+            self.decoder = UnetDecoder(
                 encoder_channels=encoder_channels[:n_blocks+1],
                 decoder_channels=decoder_channels[:n_blocks],
                 n_blocks=n_blocks,

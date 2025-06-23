@@ -8,7 +8,7 @@ import torch
 import numpy as np
 from timm.utils.model_ema import ModelEmaV2
 
-from src.utils import sigmoid
+from .utils import sigmoid
 
 class EmaCalculator:
     def __init__(self, alpha=0.99, direct_update_steps=100):
@@ -143,4 +143,3 @@ class Logger():
                 self.wl.save(model, f"fold_{fold}/best.pth")
         else:
             self.wl.save(model, f'fold_{fold}/epoch_{epoch}.pth')
-    

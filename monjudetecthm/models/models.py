@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 import timm_3d
 from timm.utils.model_ema import ModelEmaV2
-from src.models.prepare_3d_model import TimmSegModel
+from .prepare_3d_model import TimmSegModel
 
 
 def build_model_from_config(cfg):
