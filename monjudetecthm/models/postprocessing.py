@@ -1,11 +1,21 @@
 from typing import List, Union, Tuple, Optional
 import concurrent.futures
+from math import ceil
 
 import torch
 import torch.nn.functional as F
 import numpy as np
+import zarr
 
 from scipy import ndimage
+import copick
+
+try:
+    import cupy as cp
+    import cupyx.scipy.ndimage as cupy_ndimage
+except ImportError:
+    cp = None
+    cupy_ndimage = None
 
 # copied from hengck23's kernel https://www.kaggle.com/code/hengck23/speed-up-connected-component-analysis-with-pytorch
 #faster version using cuda
@@ -135,8 +145,6 @@ def hmap_to_points_ccl_gpu(hmap: np.ndarray, threshold:np.ndarray):
     points = points.get()
     return {"points": points}
 
-
-
 def hmap_to_points_pooling(
         hmap: np.ndarray,
         threshold:np.ndarray,
@@ -207,17 +215,24 @@ def weighted_box_fusion(preds, particle_radius, min_votes=1):
 
 class PostProcessor:
     """
+    CoPick-aware post-processing pipeline for cryo-ET particle detection inference.
+    
+    Automatically extracts configuration from CoPick root including:
+    - Particle classes and radii
+    - Tomogram dimensions per experiment
+    - Voxel spacing information
+    - Number of tiles per experiment based on sliding window parameters
+    
     Inference pipeline:
     1. aggregate tiled predictions (accumulate)
-    2. detect blobs in the accumulated heatmap (process)
+    2. detect blobs in the accumulated heatmap (process) 
     3. calculate the centroid of the detected blobs (process)
     """
     def __init__(self,
-            classes: List[str],
-            tiles_per_experiment: int=162,
-            pred_size = (184, 630, 630),
+            copick_root,
             window_size = (128, 128, 128),
-            resolution_hierarchy = 0,
+            window_stride = (64, 64, 64),
+            voxel_spacing: Optional[float] = None,
             threshold: Union[float, List[float]] = 0.5,
             erosion_after_threshold: Union[int, list[int]] = 0,
             weight_center: bool = False,
@@ -226,25 +241,46 @@ class PostProcessor:
             ignore_uncovered: bool = False,
             gaussian_blur_size: int = 0,
             gaussian_blur_sigma: float = 1,
-            method: str = "ccl",
+            method: str = "pooling",
             method_args: dict = {},
             wbf_radius_multiplier: float = 0.0,
-            keep_heatmaps: bool = False,
-            keep_accumulated: bool = False,
+            include_edge_windows: bool = True
         ):
         """
-        classes: list of class names. should be in the same order as the channel dimension of the predicted heatmap
+        copick_root: CoPick root object containing particle specifications
+        window_size: Size of sliding window (D, H, W)
+        window_stride: Stride for sliding window (D, H, W) 
+        voxel_spacing: Voxel spacing to use. If None, uses first available voxel spacing
         """
-        self.accumulated_data = {}# {experiment_id: {'heatmap': np.array(n_classes, *pred_size), 'count': np.array(*pred_size), 'offset': array(3, *pred_size)} }
-        self.classes = classes
-        self.tiles_per_experiment = tiles_per_experiment
-        self.predictions = {}# {experiment_id: {class: [[x, y, z], ...], class_conf: [float, ...]}}
-        self.pred_size = pred_size
+        self.copick_root = copick_root
+        self.window_size = window_size
+        self.window_stride = window_stride
+        self.include_edge_windows = include_edge_windows
+        
+        # Extract classes and particle radius from CoPick configuration
+        self.classes = [p.name for p in self.copick_root.pickable_objects if p.is_particle]
+        self.particle_radius = {p.name: p.radius for p in self.copick_root.pickable_objects if p.is_particle}
+        
+        # Auto-detect voxel spacing if not provided
+        if voxel_spacing is None:
+            # Get first available voxel spacing from first run
+            for run in self.copick_root.runs:
+                if run.voxel_spacings:
+                    self.voxel_spacing = list(run.voxel_spacings.keys())[0]
+                    break
+            else:
+                raise ValueError("No voxel spacings found in any runs")
+        else:
+            self.voxel_spacing = voxel_spacing
+            
+        # Calculate tomogram shapes and tiles per experiment from copick_root
+        self.experiment_info = self._analyze_experiments()
+        self.tiles_per_experiment = self.experiment_info['tiles_per_experiment']
+        self.pred_size = self.experiment_info['max_pred_size']
+        
+        self.accumulated_data = {}
+        self.predictions = {}
         self.threshold = threshold
-        self.pixel_spacing = [
-            10.012444196428572, 
-            10.012444196428572*2,
-            10.012444196428572*4][resolution_hierarchy]
         self.ignore_uncovered = ignore_uncovered
         self.erosion_after_threshold = erosion_after_threshold
         if weight_center:
@@ -253,30 +289,21 @@ class PostProcessor:
             self.pred_weights = np.ones(window_size)#torch.ones(window_size, device='cuda', dtype=torch.float16)
         #self.pred_weights = 1 if not weight_center else create_weight(window_size, edge_begin = 0.25, min_weight = 0.3333)
         self.pred_weights = torch.Tensor(self.pred_weights).cuda()
-        
-        self.particle_radius = {
-            'apo-ferritin': 60,  # apo-ferritin
-            'beta-amylase': 65,  # beta-amylase
-            'beta-galactosidase': 90,  # beta-galactosidase
-            'ribosome': 150,  # ribosome
-            'thyroglobulin': 130,  # thyroglobulin
-            'virus-like-particle': 135,  # virus-like-particle
-        }
 
         self.batch_size = 1
         self.to_process = []
 
         if isinstance(gaussian_blur_sigma, (int, float)):
-            gaussian_blur_sigma = [gaussian_blur_sigma] * len(classes)
+            gaussian_blur_sigma = [gaussian_blur_sigma] * len(self.classes)
         if isinstance(gaussian_blur_size, (int, float)):
-            gaussian_blur_size = [gaussian_blur_size] * len(classes)
+            gaussian_blur_size = [gaussian_blur_size] * len(self.classes)
 
-        assert len(gaussian_blur_sigma) == len(classes), "The length of gaussian_blur_sigma should be the same as the number of classes"
-        assert len(gaussian_blur_size) == len(classes), "The length of gaussian_blur_size should be the same as the number of classes"
+        assert len(gaussian_blur_sigma) == len(self.classes), "The length of gaussian_blur_sigma should be the same as the number of classes"
+        assert len(gaussian_blur_size) == len(self.classes), "The length of gaussian_blur_size should be the same as the number of classes"
 
             
         self.gaussian_kernels = {}
-        for i, c in enumerate(classes):
+        for i, c in enumerate(self.classes):
             if gaussian_blur_size[i] == 0:
                 self.gaussian_kernels[c] = None
                 continue
@@ -295,20 +322,82 @@ class PostProcessor:
         self.method_args = method_args
         self.wbf_radius_multiplier = wbf_radius_multiplier
 
-        self.keep_heatmaps=keep_heatmaps
-        self.keep_accumulated=keep_accumulated
-
-        self.adjust_th_on_the_fly = False
-        self.base_n_points = {
-            'apo-ferritin': 239/7,
-            'beta-amylase': 0,
-            'beta-galactosidase': 0,
-            'ribosome': 0,
-            'thyroglobulin': 0,
-            'virus-like-particle': 0,
+    def _analyze_experiments(self):
+        """
+        Analyze all experiments in copick_root to determine tomogram shapes and calculate tiles per experiment
+        """
+        experiment_shapes = {}
+        max_shape = [0, 0, 0]
+        
+        for run in self.copick_root.runs:
+            voxel_spacing_obj = run.get_voxel_spacing(self.voxel_spacing)
+            if not voxel_spacing_obj or not voxel_spacing_obj.tomograms:
+                print(f"No tomograms found for run {run.name} at voxel spacing {self.voxel_spacing}")
+                continue
+                
+            tomogram = voxel_spacing_obj.tomograms[0]
+            zarr_path = tomogram.zarr()
+            try:
+                zarr_array = zarr.open(zarr_path, 'r')['0']
+                tomo_shape = zarr_array.shape  # (D, H, W)
+                experiment_shapes[run.name] = tomo_shape
+                
+                # Update max shape for determining pred_size
+                for i in range(3):
+                    max_shape[i] = max(max_shape[i], tomo_shape[i])
+                    
+            except Exception as e:
+                print(f"Error opening zarr array {zarr_path} for run {run.name}: {e}")
+                continue
+        
+        if not experiment_shapes:
+            raise ValueError("No valid tomograms found in copick_root")
+            
+        # Calculate tiles per experiment based on sliding window approach
+        tiles_per_exp = {}
+        for exp_id, tomo_shape in experiment_shapes.items():
+            depth, height, width = tomo_shape
+            stride_d, stride_h, stride_w = self.window_stride
+            size_d, size_h, size_w = self.window_size
+            
+            if self.include_edge_windows:
+                num_d = ceil((depth - size_d) / stride_d) + 1 if depth > size_d else 1
+                num_h = ceil((height - size_h) / stride_h) + 1 if height > size_h else 1
+                num_w = ceil((width - size_w) / stride_w) + 1 if width > size_w else 1
+            else:
+                num_d = max(1, (depth - size_d) // stride_d + 1) if depth >= size_d else 0
+                num_h = max(1, (height - size_h) // stride_h + 1) if height >= size_h else 0
+                num_w = max(1, (width - size_w) // stride_w + 1) if width >= size_w else 0
+                
+            tiles_per_exp[exp_id] = num_d * num_h * num_w
+            
+        return {
+            'experiment_shapes': experiment_shapes,
+            'tiles_per_experiment': tiles_per_exp,
+            'max_pred_size': tuple(max_shape),
+            'uniform_tiles_per_exp': len(set(tiles_per_exp.values())) == 1
         }
+    
+    def get_experiment_ids(self):
+        """Get list of experiment IDs available in copick_root"""
+        return [run.name for run in self.copick_root.runs]
+    
+    def get_available_voxel_spacings(self):
+        """Get list of available voxel spacings across all runs"""
+        spacings = set()
+        for run in self.copick_root.runs:
+            spacings.update(run.voxel_spacings.keys())
+        return sorted(list(spacings))
+    
+    def get_tomogram_shape(self, experiment_id: str):
+        """Get tomogram shape for a specific experiment"""
+        return self.experiment_info['experiment_shapes'].get(experiment_id)
+    
+    def get_tiles_count(self, experiment_id: str):
+        """Get expected number of tiles for a specific experiment"""
+        return self.tiles_per_experiment.get(experiment_id)
 
-    def process(self, heatmap: np.ndarray, offset: Optional[np.ndarray] = None, threshold: Union[float, List[float]] = 0.5, erosion: Union[int, List[int]] = 0): 
+    def process(self, heatmap: np.ndarray, threshold: Union[float, List[float]] = 0.5, erosion: Union[int, List[int]] = 0): 
         """
         performs a blob detection on the accumulated heatmap, then returns the center coordinates of the detected blobs
         heatmap should have a shape of (n_classes, D, H, W)
@@ -332,31 +421,12 @@ class PostProcessor:
                 **self.method_args
             )
 
-            if self.adjust_th_on_the_fly:
-                n_points = len(preds['points'])
-                new_th = threshold + (n_points - self.base_n_points[c]) * 1e-3
-                new_th = np.clip(new_th, -0.3, 1.0)
-                preds = self.postprocess_methods[self.postprocess_method](
-                    heatmap[i],
-                    new_th,
-                    **self.method_args
-                )
-
-
             if len(preds["points"]) == 0:
                 class_points[c] = {
                     'points': np.zeros((0, 3)),
                     'confidence': np.zeros(0),
                 }
                 continue
-
-            if offset is not None:
-                preds["points"] += offset[
-                    :, 
-                    preds["points"][:, 0], 
-                    preds["points"][:, 1], 
-                    preds["points"][:, 2]
-                ].cpu().numpy().T * (self.particle_radius[c] / self.pixel_spacing)
 
             wbf_radius_mul = self.wbf_radius_multiplier if isinstance(self.wbf_radius_multiplier, (int, float)) else self.wbf_radius_multiplier[i]
             if wbf_radius_mul > 0:
@@ -366,7 +436,7 @@ class PostProcessor:
                 preds = weighted_box_fusion(preds, self.particle_radius[c]*wbf_radius_mul)
             points = preds["points"]
             points = points[:, ::-1]# z, y, x -> x, y, z
-            points *= self.pixel_spacing
+            points *= self.voxel_spacing
             class_points[c] = {
                 'points': points,
             }
@@ -383,10 +453,6 @@ class PostProcessor:
         accumulates the data for the past frames
         samples with new experiment_id should only be passed after all the samples with the previous experiment_id have been passed
         """
-        if isinstance(heatmaps, (list, tuple)):
-            heatmaps, offsets = heatmaps
-        else:
-            offsets = None
         heatmaps = heatmaps.half()
         for i, experiment_id in enumerate(experiment_ids):
             if experiment_id not in self.accumulated_data:
@@ -395,13 +461,10 @@ class PostProcessor:
                     'count': torch.zeros(self.pred_size, device=heatmaps.device, dtype=torch.float16),
                     'n_tiles': 0,
                 }
-                if offsets is not None:
-                    self.accumulated_data[experiment_id]['offset'] = torch.zeros((3, *self.pred_size), device=heatmaps.device, dtype=torch.float16)
 
             heatmap = heatmaps[i]
             crop_size = heatmap.shape[1:]
             crop_origin = crop_origins[i]
-            offset = offsets[i] if offsets is not None else None
 
             self.accumulated_data[experiment_id]['heatmaps'][
                 :,
@@ -414,130 +477,19 @@ class PostProcessor:
                 crop_origin[1]: crop_origin[1] + crop_size[1],
                 crop_origin[2]: crop_origin[2] + crop_size[2],
             ] += self.pred_weights
-            if offset is not None:
-                self.accumulated_data[experiment_id]['offset'][
-                    :,
-                    crop_origin[0]: crop_origin[0] + crop_size[0],
-                    crop_origin[1]: crop_origin[1] + crop_size[1],
-                    crop_origin[2]: crop_origin[2] + crop_size[2],
-                ] += offset
             self.accumulated_data[experiment_id]['n_tiles'] += 1
 
-            if self.accumulated_data[experiment_id]['n_tiles'] == self.tiles_per_experiment:
+            # Get experiment-specific tile count
+            expected_tiles = self.tiles_per_experiment.get(experiment_id, list(self.tiles_per_experiment.values())[0])
+            if self.accumulated_data[experiment_id]['n_tiles'] == expected_tiles:
                 self.predictions[experiment_id] = {}
                 #if self.batch_size > 1:
                 #    self.to_process.append(experiment_id)
                 if self.accumulated_data[experiment_id]['count'].min() == 0 and not self.ignore_uncovered:
-                    print(self.accumulated_data[experiment_id]['count'])
-                    print((self.accumulated_data[experiment_id]['count']==0).sum())
-                    print(f"Experiment {experiment_id} has uncovered regions")
                     raise ValueError('Some regions are not covered by the tiles')
                 heatmap = self.accumulated_data[experiment_id]['heatmaps'] / self.accumulated_data[experiment_id]['count']
-                if 'offset' in self.accumulated_data[experiment_id]:
-                    offset = self.accumulated_data[experiment_id]['offset'] / self.accumulated_data[experiment_id]['count']
-                else:
-                    offset = None
-
-                if self.keep_heatmaps:
-                    self.predictions[experiment_id]['heatmap'] = heatmap.detach().cpu().numpy()
                     
-                self.predictions[experiment_id].update(self.process(heatmap, offset=offset, threshold = self.threshold))
+                self.predictions[experiment_id].update(self.process(heatmap, threshold = self.threshold))
 
                 del self.accumulated_data[experiment_id]
                 
-        def process_remaining(self):
-            self.process_batch(self.to_process)
-
-        def process_batch(self, heatmaps: List[np.ndarray], threshold: float, mode = "ccl"):
-            """
-            performs a blob centroid detection of heatmaps in batch
-            heatmaps should be a list of np.array with shape (n_classes, D, H, W)
-            threshold should be the detection threshold, which its meaning may differ among the modes
-            mode should be either "ccl" or "pooling"
-            """
-            assert mode in ["ccl", "pooling"], f"Unsupported mode: {mode}"
-            if mode == "ccl":
-                self.process_batch_ccl(heatmaps, threshold)
-            elif mode == "pooling":
-                self.process_batch_pooling(heatmaps, threshold)
-
-        def process_batch_ccl(self, heatmaps: List[np.ndarray], threshold: float):
-            """
-            performs a blob centroid detection of heatmaps in batch using connected component labeling
-            heatmaps should be a list of np.array with shape (n_classes, D, H, W)
-            threshold should be the detection threshold
-            """
-            with concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = [executor.submit(
-                    process_single_hmap_ccl,
-                    None,#bbox_points
-                ) for c in self.classes for hmap in heatmaps]
-                for future in concurrent.futures.as_completed(futures):
-                    result = future.result()
-
-                    if return_metadata is not None and 'metadata' in result:
-                        metadata['positions'].append(result['metadata']['position'])
-                        metadata['instance_numbers'].append(result['metadata']['instance_number'])
-                        if metadata['orientation'] is None:
-                            metadata['orientation'] = result['metadata']['orientation']
-                            metadata['spacing'] = result['metadata']['spacing']
-
-                    if result['coord_mm'] is not None:
-                        for coord_mm, disc_class, condition_class in result['coord_mm']:
-                            coords[disc_class][condition_class] = coord_mm
-        def process_single_hmap_ccl(hmap: np.ndarray, threshold: float):
-            """
-            performs a blob centroid detection of a single heatmap using connected component labeling
-            hmap should have a shape of (D, H, W)
-            threshold should be the detection threshold
-            """
-            binary = hmap > threshold
-            label, n_obj = ndimage.label(binary)
-            points = ndimage.center_of_mass(hmap, label)
-
-
-if __name__ == '__main__':
-    import pprint
-    import matplotlib.pyplot as plt
-    # test find_connected_component
-    ind = np.indices((128, 128, 128))
-    hmap = np.zeros((5, 128, 128, 128))
-    points = {i: [] for i in range(5)}
-    for c in range(5):
-        for _ in range(np.random.randint(5, 10)):
-            point = np.random.randint(0, 128, 3)
-            points[c].append(point)
-            hmap[c] = np.maximum(
-                gaussian_kernel(ind, point, 10),
-                hmap[c]
-            )
-    
-    postprocessor = PostProcessor(['class1', 'class2', 'class3', 'class4', 'class5'])
-    print(postprocessor.process(hmap, 0))
-
-
-    threshold = [0.5]*5
-    max_radius = 100
-    pprint.pprint(points[0])
-    print(hmap_to_points_ccl(hmap[0], 0.5))
-    exit()
-    hmap = torch.Tensor(hmap).cuda()
-    component = find_connecte_component(hmap, threshold, max_radius)
-    print(component.shape)
-    for i in range(0, 128, 10):
-        plt.imshow(component[0, i].cpu().numpy())
-        plt.show()
-    # test find_centroid
-    centroid = find_centroid(component)
-    pprint.pprint(points)
-    print(centroid)
-    breakpoint()
-    # test PastProcessor
-    classes = ['class1', 'class2']
-    pred_size = (10, 10, 10)
-    past_processor = PostProcessor(classes, pred_size)
-    heatmaps = np.random.rand(2, 10, 10, 10)
-    crop_origins = np.random.randint(0, 10, (2, 3))
-    experiment_ids = [0, 0]
-    past_processor.accumulate(heatmaps, crop_origins, experiment_ids)
-    print(past_processor.accumulated_data)

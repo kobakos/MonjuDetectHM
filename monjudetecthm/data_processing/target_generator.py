@@ -53,84 +53,54 @@ class TargetGenerator():
     def __init__(self,
             target_size: Tuple,
             classes: List[str],
-            particle_radius: Dict[str, int],
-            resolution_hierarchy: int = 0,
+            particle_radius: Dict[str, float],
+            voxel_spacing: float = 10.0,
             crop_margin: int = 10,
             kernel_size_multiplier: int = 3,
             kernel_sigma_multiplier: float = 1/3,
-            return_as_points: bool = False,
-            return_num_points: bool = False,
-            generate_offset_target: bool = False,
-            offset_radius_multiplier: float = 0.1,
         ):
         self.target_size = np.asarray(target_size)
         self.classes = classes
-        self.particle_radius = particle_radius
         self.crop_margin = crop_margin
-        self.pixel_spacing = [
-            10.012444196428572, 
-            10.012444196428572*2,
-            10.012444196428572*4][resolution_hierarchy]
-        self.return_as_points = return_as_points
-        self.return_num_points = return_num_points
+
+        self.voxel_spacing = voxel_spacing
+
+        particle_radius_pix={cls: int(radius / voxel_spacing) for cls, radius in particle_radius.items()}
 
         self.gaussian_kernels = {
             cls: generate_gaussian_kernel(
-                [particle_radius[cls]*kernel_size_multiplier]*3,
-                particle_radius[cls] * (kernel_sigma_multiplier if isinstance(kernel_sigma_multiplier, (int, float)) else kernel_sigma_multiplier[i])
+                [int(particle_radius_pix[cls]*kernel_size_multiplier)]*3,
+                particle_radius_pix[cls] * (kernel_sigma_multiplier if isinstance(kernel_sigma_multiplier, (int, float)) else kernel_sigma_multiplier[i])
             )
             for i, cls in enumerate(classes)
         }
 
-        self.generate_offset_target = generate_offset_target
-        self.offset_kernels = {
-            cls: generate_offset_kernel(round(particle_radius[cls] * offset_radius_multiplier))
-            for cls in classes
-        }
-
-    def __call__(self, class_points_angstrom: Dict[str, np.ndarray], crop: Optional[np.ndarray]=None, affine: Optional[np.ndarray]=None):
+    def __call__(self, class_points: Dict[str, np.ndarray], crop: Optional[np.ndarray]=None, affine: Optional[np.ndarray]=None):
         """
         crop should be none or array with shape (3, 2), where the first dimension corresponds to the axis and the second to the start and end of the crop
         """
-        total_points = 0
         #target = [] if not self.return_as_points else {'heatmaps': [], 'labels': [], 'boxes': [], 'num_points': 0}# it is named boxes to reuse the code of detr
         target = {
             'heatmap': np.zeros((len(self.classes), *self.target_size), dtype=np.float32),
-            'points': {c: [] for c in self.classes},
+            'points': {},
         }
-        if self.generate_offset_target:
-            target['offset'] = np.full((len(self.classes), 3, *self.target_size), -1, dtype=np.float32)
         for class_index, class_name in enumerate(self.classes):
-            points_angstrom = class_points_angstrom[class_name]
-            points = self.convert_to_pixels(points_angstrom)
+            points = class_points[class_name]
+            #points = self.to_pixels(points_angstrom)
             if crop is not None:
                 points = crop_points(points, crop, margin = self.crop_margin)
             if affine is not None and len(points) > 0:
                 points = (affine[:3, :3] @ points.T + affine[:3, 3:]).T
                 points = crop_points(points, np.array([[0, self.target_size[0]], [0, self.target_size[1]], [0, self.target_size[2]]]), margin = self.crop_margin, reset_origin=False)
-            if self.return_num_points:
-                num_points = len(points)
-                total_points += num_points
             target['points'][class_name] = points
-            if self.return_as_points:
-                target['labels'] = target.get('labels', []) + [class_index] * len(points)
-                if 'boxes' not in target:
-                    target['boxes'] = []
-                target['boxes'].append(points)
-            else:
-                self.generate_single_class(points, class_name, target['heatmap'][class_index])
-                if self.generate_offset_target:
-                    self.generate_offset_target_single_class(points, class_name, target['offset'][class_index])
-                    
-                
-        if self.return_num_points:            
-            target['num_points'] = total_points
-        if self.return_as_points:
-            target['labes'] = np.array(target['labels'])
-            target['boxes'] = np.concatenate(target['boxes'], axis=0)
-            target['boxes'] = target['boxes'] / self.target_size[None, :]# normalize the coords
-            #target['labels'] = np.eye(len(self.classes))[target['labels']]# one hot encode the labels
+            self.generate_single_class(points, class_name, target['heatmap'][class_index])
         return target
+    
+    def to_pixels(self, points):
+        """
+        Converts points in Angstrom to pixels based on the target size and voxel spacing.
+        """
+        return points / self.voxel_spacing
     
     def generate_offset_target_single_class(self, points: np.ndarray, class_name: str, target: np.ndarray):
         # target: (3, *self.target_size)
@@ -176,9 +146,6 @@ class TargetGenerator():
             ),
             kernel
         )
-    
-    def convert_to_pixels(self, points: np.ndarray):
-        return points / self.pixel_spacing # the spacing
 
     
 if __name__ == '__main__':

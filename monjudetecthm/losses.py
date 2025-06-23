@@ -3,9 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-
-
-from src.component_factory import create_criterion
+from .component_factory import create_criterion
 #from models.detr.prepare_detr import prepare_czii_setcriterion
 def from_cfg(cfg):
     if cfg["name"] == "FocalTverskyLoss":
@@ -161,7 +159,6 @@ class BceWithOffset(torch.nn.Module):
         loss += self.offset_weight * self.offset_loss(y, t)
         return loss
 
-import src.constants
 class HmapRegHeadLoss(torch.nn.Module):
     def __init__(self,
             threshold=0.3,
@@ -280,28 +277,6 @@ class HmapRegHeadLoss(torch.nn.Module):
 
     def filter_positive_hmap(self, detected_objects, target_hmap):
         return detected_objects & (target_hmap > self.th)
-
-if __name__ == '__main__':
-    classes = ['c1', 'c2']
-    reg_maps = [torch.rand(2, 3, 10, 10, 10) for _ in classes]
-    target = {
-        'heatmap': torch.rand(2, 2, 10, 10, 10),
-        'points': {
-            'c1': torch.Tensor([
-                [0, 0, 0, 0],
-                [0, 0, 5, 5]
-            ]),
-            'c2': torch.Tensor([
-                [1, 0, 0, 0],
-                [1, 0, 5, 5]
-            ]),
-        }
-    }
-    hmap = torch.rand(2, 2, 10, 10, 10)
-    hmap[0, 0, 0, 0, 0] = 100
-    hmap[1, 1, 0, 5, 5] = 100
-    loss = HmapRegHeadLoss(classes=classes)
-    print(loss((hmap, reg_maps), target))
     
 class NormalizedBCE(torch.nn.Module):
     def __init__(self, eps=0, pos_weight = None):
@@ -330,11 +305,11 @@ class HeatmapWeightedBCE(torch.nn.Module):
         return (self.bce(y, t) * weight).mean()
 
 class WeightedFocalLoss(torch.nn.Module):
-    def __init__(self, weights = [1], alpha=2, beta=4):
+    def __init__(self, weights = [1], alpha=2, beta=4, device='cuda'):
         super().__init__()
         self.alpha = alpha
         self.beta = beta
-        self.class_weights = torch.tensor(weights).float().cuda()
+        self.class_weights = torch.tensor(weights).float().to(device)
     def forward(self, pred, target):
         """
         pred: (N, C, D, H, W)

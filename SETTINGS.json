@@ -1,7 +1,0 @@
-{
-    "base_path": ".",
-    "competition_data_path": "data/original",
-    "external_data_path": "data/external",
-    "processed_data_path": "data/processed",
-    "model_save_dir": "results"
-}

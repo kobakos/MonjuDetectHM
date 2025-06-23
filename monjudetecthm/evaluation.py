@@ -2,23 +2,6 @@ import torch
 import pprint
 from typing import Optional
 
-import src.constants as constants
-
-class ModelValVisualizer:
-    def __init__(self, model, val_dl, device):
-        self.model = model
-        self.val_dl = val_dl
-        self.device = device
-
-    def visualize(self):
-        self.model.eval()
-        with torch.no_grad():
-            for images, targets in self.val_dl:
-                images, targets = images.to(self.device), targets.to(self.device)
-                out = self.model(images)
-                # visualize the images and the predictions
-                breakpoint()
-
 """
 Derived from:
 https://github.com/cellcanvas/album-catalog/blob/main/solutions/copick/compare-picks/solution.py
@@ -28,6 +11,50 @@ import numpy as np
 import pandas as pd
 
 from scipy.spatial import cKDTree as KDTree
+
+
+def generate_gt_sub_df(copick_root):
+    """
+    Generates a Dataframe with this format from ground truth data:
+    id,experiment,particle_type,x,y,z
+    0,TS_5_4,beta-amylase,2983.596,3154.13,764.124
+    1,TS_5_4,beta-amylase,2983.596,3154.13,764.124
+    2,TS_5_4,beta-galactosidase,2983.596,3154.13,764.124
+    3,TS_6_4,ribosome,2983.596,3154.13,764.124
+    4,TS_6_4,ribosome,2983.596,3154.13,764.124
+    5,TS_6_4,ribosome,2983.596,3154.13,764.124
+    6,TS_69_2,apo-ferritin,2983.596,3154.13,764.124
+    7,TS_69_2,beta-galactosidase,2983.596,3154.13,764.124
+    8,TS_69_2,ribosome,2983.596,3154.13,764.124
+    9,TS_69_2,virus-like-particle,2983.596,3154.13,764.124
+    """
+    df={
+        "id": [],
+        "experiment": [],
+        "particle_type": [],
+        "x": [],
+        "y": [],
+        "z": [],
+    }
+    clasess = [p.name for p in copick_root.pickable_objects if p.is_particle]
+    for run in copick_root.runs:
+        points = {}
+        for pick in run.get_picks():
+            if not pick.pickable_object_name in clasess:
+                continue
+            pick_points, _ = pick.numpy()
+            if len(pick_points) > 0:
+                points[pick.pickable_object_name]=pick_points
+        for particle_type, points_array in points.items():
+            for point in points_array:
+                df["id"].append(len(df["id"]))
+                df["experiment"].append(run.name)
+                df["particle_type"].append(particle_type)
+                df["x"].append(point[0])
+                df["y"].append(point[1])
+                df["z"].append(point[2])
+    df = pd.DataFrame(df)
+    return df
 
 def pred_dicts_to_df(preds):
     df = {
@@ -40,8 +67,6 @@ def pred_dicts_to_df(preds):
     }
     for experiment_id in preds:
         for class_str in preds[experiment_id]:
-            if class_str not in constants.classes:
-                continue
             for pred in preds[experiment_id][class_str]['points']:
                 df['id'].append(len(df['id']))
                 df['experiment'].append(experiment_id)

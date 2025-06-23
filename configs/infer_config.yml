@@ -14,7 +14,7 @@ criterion:
   - 24.0
   - 36.0
   - 36.0
-feature_extractor_args:
+dataset:
   clip_percentile:
   - 0.1
   - 99.9
@@ -22,6 +22,11 @@ feature_extractor_args:
   - 128
   - 128
   - 128
+  image_stride:
+  - 64
+  - 64
+  - 64
+  voxel_spacing: 10.0
   kernel_sigma_multiplier: 0.2
   kernel_size_multiplier: 7
   rescale_factor: 100000
@@ -32,27 +37,7 @@ ensemble:
   
 metric:
   name: bce
-model:
-  decoder_channels:
-  - 256
-  - 128
-  - 64
-  - 32
-  - 16
-  detr: false
-  device: cuda
-  drop_path_rate: 0.2
-  drop_rate: 0.1
-  ema:
-    decay: 0.995
-  final_activation: null
-  in_chans: 1
-  n_classes: 5
-  name: resnet50d.ra2_in1k
-  #pretrain_weight_path: /home/kobakos/Kaggle/cryoet/experiments/207_resnet50d.ra2_in1k_20250116/weights/fold_0/best.pth
-  pretrained: false
-  use_2d_enc: false
-  use_timm_3d: false
+  
 postprocessing:
   method: pooling
   threshold:
