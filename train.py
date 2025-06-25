@@ -12,21 +12,22 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from src.utils.utils import load_configs
-from src.component_factory import create_optimizer, create_scheduler, create_criterion, create_metric
-from src.data_processing import build_dataloaders
-from src.utils.loop import to_device
-from src.utils import sigmoid
-from src.models import build_model_from_config
-from src.models.postprocessing import PostProcessor
-from src.evaluation import score, pred_dicts_to_df
+import copick
+from copick.impl.filesystem import CopickRootFSSpec
 
-from src.losses import from_cfg
+from monjudetecthm.utils.utils import load_configs
+from monjudetecthm.component_factory import create_optimizer, create_scheduler, create_criterion, create_metric
+from monjudetecthm.data_processing.dataset import generate_sliding_window_index, build_dataloaders, split_by_run_name
+from monjudetecthm.utils.loop import to_device
+from monjudetecthm.utils import sigmoid
+from monjudetecthm.models import build_model_from_config
+from monjudetecthm.models.postprocessing import PostProcessor
+from monjudetecthm.evaluation import score, pred_dicts_to_df, generate_gt_sub_df
+from monjudetecthm.losses import from_cfg
+from monjudetecthm.logger import Logger, EmaCalculator
 
-from src.logger import Logger, EmaCalculator
-
-def train_single_fold(fold):
-    print(f'============================================start of fold {fold}=============================================')
+def train_single_fold(fold, train_dl, val_dl, val_df, val_index, val_sub_df, cfg, copick_root):
+    print(f'============================================start of training=============================================')
     # create model and whatnot
     model = build_model_from_config(cfg['model'])
     print(f"Model parameter count: {sum(p.numel() for p in model.parameters())}")
@@ -35,37 +36,19 @@ def train_single_fold(fold):
     if log:
         logger.reset_best_metric()
     criterion = from_cfg(cfg['criterion'])
-    if 'dann' in cfg['criterion']['name']:
-        val_criterion = from_cfg(cfg['criterion']['classifier'])
-    elif cfg['criterion']['name'] == 'bce_w_offset':
-        criterion_cfg = cfg['criterion'].copy()
-        criterion_cfg['name'] = 'bce'
-        val_criterion = lambda x, y: from_cfg(criterion_cfg)(x[0], y)
-    else:
-        val_criterion = criterion
-    metric = create_metric(cfg['metric'])
+    val_criterion = criterion
     post_processor = PostProcessor(
-        classes = [
-            'apo-ferritin',
-            # 'beta-amylase', # ignore beta-amylase for now as it is deemed impossible to detect
-            'beta-galactosidase',
-            'ribosome',
-            'thyroglobulin',
-            'virus-like-particle'
-        ],
-        tiles_per_experiment = 162,
+        copick_root=copick_root,
+        window_size=cfg['dataset']['image_size'], 
+        window_stride=cfg['dataset']['image_stride'],
+        voxel_spacing=cfg['dataset']['voxel_spacing'],
         **cfg["postprocessing"]
     )
-
-    # data preparation
-    val_df_fold = val_df[val_df['fold'] == fold]
-    val_sub_df = train_sub_df[train_sub_df['experiment'].isin(val_df_fold['experiment_id'])]
     
     # main training loop
     loss_ema = EmaCalculator(cfg['system']['loss_alpha'])
     best_val_loss = 1e6
     for epoch in range(cfg['train_loop']['n_epochs']):
-        train_dl, val_dl = build_dataloaders(train_df, val_df, fold, cfg, settings, pretrain=cfg['pretrain'], epoch=epoch)
         # training loop
         model.train()
         all_losses_mean = 0
@@ -75,11 +58,7 @@ def train_single_fold(fold):
         else:
             pbar = train_dl
         for i, (images, targets) in enumerate(pbar):
-            #print(images.shape)
             images, targets = to_device(images, targets, cfg['system']['device'])
-            targets['epoch'] = epoch
-            if cfg["model"].get("dann", False):
-                images = images, epoch + i / len(train_dl)
             with torch.autocast(device_type = cfg['system']['device'], dtype=AMP_DTYPE):
                 out = model(images)
                 loss = criterion(out, targets)
@@ -87,42 +66,14 @@ def train_single_fold(fold):
             # update various loss metrics
             all_losses_mean = (all_losses_mean * i + loss.item()) / (i + 1)
             loss_ema.update(loss.item())
-            if False and log and loss > 1.5 * loss_ema.ema:
-                targets = targets['heatmap']
-                t = targets.cpu().float().numpy() 
-                if cfg["model"].get("dann", False):
-                    o = out[0].cpu().detach().float().numpy()
-                    im = images[0].cpu().numpy()
-                elif cfg['criterion']['name'] == 'bce_w_offset':
-                    o = out[0].cpu().detach().float().numpy()
-                    im = images.cpu().numpy()
-                else:
-                    o = out.cpu().detach().float().numpy()
-                    im = images.cpu().numpy()
-                logger.log_heatmap_preds(
-                    image=im,
-                    target=t, 
-                    output=o,
-                    fold=fold,
-                    epoch=epoch,
-                    name='irregular_training_loss'
-                )
 
             loss.backward()
             if cfg['train_loop']['max_grad_norm'] > 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train_loop']['max_grad_norm'])
             
             if (i + 1) % cfg['train_loop']['gradient_accumulation_steps'] == 0:
-                if cfg['optimizer']['name'] == 'sam':
-                    optimizer.first_step(zero_grad=True)
-                    with torch.autocast(device_type = cfg['system']['device'], dtype=AMP_DTYPE):
-                        out = model(images)
-                        loss = criterion(out, targets)
-                    loss.backward()
-                    optimizer.second_step(zero_grad=True)
-                else:
-                    optimizer.step()
-                    optimizer.zero_grad()
+                optimizer.step()
+                optimizer.zero_grad()
 
             if cfg['scheduler']['name'] == 'cosine_timm':
                 scheduler.step(epoch + i / len(train_dl))
@@ -131,12 +82,11 @@ def train_single_fold(fold):
 
             if i % cfg['system']['log_freq'] == 0 and log:
                 logger.log({
-                    'fold': fold,
                     'epoch': epoch,
                     'batch': i,
                     'train_loss': loss.item(),
                     'train_loss_ema': loss_ema.ema,
-                    'train_step': epoch * len(train_dl) + i})      
+                    'train_step': epoch * len(train_dl) + i})
             if args.tqdm:          
                 pbar.set_postfix(OrderedDict(
                     loss = loss.item(),
@@ -159,45 +109,24 @@ def train_single_fold(fold):
             pbar = val_dl
         for i, (images, targets) in enumerate(pbar):
             images, targets = to_device(images, targets, cfg['system']['device'])
-            if cfg["model"].get("dann", False):
-                images = images, epoch + i / len(train_dl)
     
             with torch.no_grad():
                 with torch.autocast(device_type=cfg['system']['device'], dtype=INFER_AMP_DTYPE):
                     out = model(images)
-                    #os.makedirs('./visualization_results/offset_map', exist_ok=True)
-                    #for d0 in range(out[1][0].shape[1]):
-                    #    m=out[1][0][:, d0].cpu().numpy().transpose((1, 2, 0))
-                    #    print(m.min())
-                    #    print(m.max())
-                    #    m = m / 10
-                    #    m += 0.5
-                    #    m *= 255
-                    #    m = m.clip(0, 255).astype(np.uint8)
-                    #    cv2.imwrite(f'./visualization_results/offset_map/{d0}.png', m)
-                    if cfg["model"].get("dann", False):
-                        images = images[0]
-                        out = out[0]
                     val_loss = val_criterion(out, targets)
-            crop_origins = val_df_fold.iloc[i * cfg['train_loop']['val_batch_size']: (i + 1) * cfg['train_loop']['val_batch_size'], [2, 3, 4]].values
-            experiment_ids = val_df_fold.iloc[i * cfg['train_loop']['val_batch_size']: (i + 1) * cfg['train_loop']['val_batch_size'], 0].values
+            bs = cfg['train_loop']['val_batch_size']
+            crop_origins = val_df.loc[val_index[i * bs: (i + 1) * bs], 'crop_origin_d0':'crop_origin_d2'].values
+            experiment_ids = val_df.loc[val_index[i * bs: (i + 1) * bs], 'experiment_id'].values
 
-            #if log and (i+1) % log_freq == 0:
-            #    if cfg['criterion']['name'] == 'bce_w_offset':
-            #        out = out[0]
-            #    targets = targets['heatmap']
-            #    t = targets.cpu().float().numpy() 
-            #    o = out.cpu().float().numpy()
-            #    im = images.cpu().numpy()
-            #    logger.log_heatmap_preds(image=im, target=t, output=o, fold=fold, epoch=epoch)
             del images, targets
             post_processor.accumulate(out, crop_origins, experiment_ids)
 
             val_loss_mean = (val_loss_mean * i + val_loss.item()) / (i + 1)
-            #exit()
         assert post_processor.accumulated_data == {}
         pred_sub_df = pred_dicts_to_df(post_processor.predictions)
-        val_metric_mean = score(val_sub_df, pred_sub_df, None)#, distance_multiplier=1.0)
+        pred_sub_df.to_csv('predictions.csv', index=False)
+        val_sub_df.to_csv('gt_predictions.csv', index=False)
+        val_metric_mean = score(val_sub_df, pred_sub_df, None)
         if args.tqdm:
             pbar.close()
         best_val_loss = min(best_val_loss, val_loss_mean)
@@ -227,7 +156,6 @@ def train_single_fold(fold):
             if logger.early_stop(patience=cfg['train_loop']['early_stop_patience']):
                 print(f'Early stopping at epoch {epoch}')
                 break
-        torch.save(model.state_dict(), f'./latest.pth')
         print()
         if args.sanity_check:
             break
@@ -251,18 +179,13 @@ if __name__ == '__main__':
     parser.add_argument('--tqdm', action='store_true', help='Use tqdm')
     parser.add_argument('--disable-wandb', action='store_true', help='Disable wandb')
     parser.add_argument('--sanity_check', action='store_true', help='Run sanity check with short steps/epochs')
-    parser.add_argument('--settings', type=str, help='Path to settings.json', default='SETTINGS.json')
+    parser.add_argument('--model_save_dir', type=str, default='results', help='Directory to save models')
+    parser.add_argument('--copick_config_path', type=str, default='copick_config.json', help='Path to the CoPick config file')
     args = parser.parse_args()
-
-    # Load settings from SETTINGS.json
-    settings = load_configs(args.settings)
     
     config_file = args.config
     with open(config_file, encoding='utf-8')as f:
         cfg = yaml.safe_load(f)
-
-    # Make sure paths from settings are used in config
-    BASE_PATH = Path(settings['base_path'])
 
     if cfg["system"]['amp_dtype'] == 'fp16':
         AMP_DTYPE = torch.float16
@@ -284,19 +207,62 @@ if __name__ == '__main__':
 
     log = args.log
     if log:
-        logger = Logger(cfg, BASE_PATH / settings["model_save_dir"], args.disable_wandb, metric_init=0 if cfg.get('save_by', 'val_metric') == 'val_metric' else 1e6)
+        logger = Logger(cfg, args.model_save_dir, args.disable_wandb, metric_init=0 if cfg.get('save_by', 'val_metric') == 'val_metric' else 1e6) # MODIFIED: use args
 
     if args.detect_anomaly:
         torch.autograd.set_detect_anomaly(True)
 
     seed_everything(cfg['system']['seed'])
 
-    processed_path = Path(settings['processed_data_path'])
-    
-    train_df = pd.read_csv(BASE_PATH / processed_path / cfg["paths"]["train_df_path"])
-    val_df = pd.read_csv(BASE_PATH / processed_path / cfg["paths"]["val_df_path"])
-    train_sub_df = pd.read_csv(BASE_PATH / processed_path / cfg["paths"]["train_sub_df_path"])
-
     log_freq = cfg['system']['log_freq']
-    for fold in range(cfg['train_loop']['n_folds']):
-        train_single_fold(fold)
+
+    # generate copick_root object
+    assert args.copick_config_path or args.dataset_id, "Either --copick_config_path or --dataset_id must be provided"
+    copick_root = copick.from_file(args.copick_config_path)
+
+    gt_sub_df = generate_gt_sub_df(
+        copick_root=copick_root,
+    )
+    train_df = generate_sliding_window_index(
+        copick_root=copick_root,
+        image_size=cfg['dataset']['image_size'],
+        image_stride=cfg['dataset']['image_stride'],
+        voxel_spacing=cfg['dataset']['voxel_spacing'],
+        include_edge_windows=False,
+    )
+    val_df = generate_sliding_window_index(
+        copick_root=copick_root,
+        image_size=cfg['dataset']['image_size'],
+        image_stride=cfg['dataset']['image_stride'],
+        voxel_spacing=cfg['dataset']['voxel_spacing'],
+        include_edge_windows=True,
+    )
+
+    folds = split_by_run_name(
+        df=train_df,
+        n_folds=cfg['train_loop']['n_folds'],
+        random_state=cfg['system']['seed'],
+    )
+
+    train_index = train_df.index.values[~train_df['experiment_id'].isin(folds[0])]
+    val_index = val_df.index.values[val_df['experiment_id'].isin(folds[0])]
+
+    train_dl, val_dl = build_dataloaders(
+        copick_root=copick_root,
+        df=train_df,
+        val_df=val_df,
+        train_index=train_index,
+        val_index=val_index,
+        cfg=cfg
+    )
+    
+    train_single_fold(
+        fold=0,
+        train_dl=train_dl,
+        val_dl=val_dl,
+        val_df=val_df,
+        val_index=val_index,
+        val_sub_df=gt_sub_df[gt_sub_df['experiment'].isin(folds[0])],
+        cfg=cfg,
+        copick_root=copick_root
+    )

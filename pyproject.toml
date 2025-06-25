@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "7th place winning model of the czii object identification competition"
 requires-python = ">=3.10"
 dependencies = [
+    "copick>=1.2.0",
     "cryoet-data-portal>=4.4.1",
     "matplotlib>=3.10.3",
+    "mlflow>=2.8.0",
     "ndjson>=0.3.1",
     "numpy>=2.2.5",
     "opencv-python-headless>=4.11.0.86",
@@ -19,3 +21,8 @@ dependencies = [
     "tqdm>=4.67.1",
     "zarr>=2.18.3",
 ]
+[tool.setuptools.packages.find]
+where = ["monjudetecthm"]
+
+[tool.setuptools]
+package-dir = {"" = "."}
