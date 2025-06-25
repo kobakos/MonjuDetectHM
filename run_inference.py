@@ -159,7 +159,6 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str, help='Path to the directory containing configs and weights', default='results/209_resnet50d.ra2_in1k_20250116')
     parser.add_argument('--detect_anomaly', action='store_true', help='Enable anomaly detection')
     parser.add_argument('--tqdm', action='store_true', help='Use tqdm')
-    parser.add_argument('--dtype', type=str, default='bfloat16', help='AMP dtype (bfloat16 or float16)')
     args = parser.parse_args()
 
     config_file = args.config
@@ -178,23 +177,23 @@ if __name__ == "__main__":
 
     if args.detect_anomaly:
         torch.autograd.set_detect_anomaly(True)
-
-    if args.dtype == 'float32':
+    
+    if cfg['system']['infer_amp_dtype'] == 'fp32':
         AMP_DTYPE = torch.float32
-    elif args.dtype == 'bfloat16':
+    elif cfg['system']['infer_amp_dtype'] == 'bf16':
         AMP_DTYPE = torch.bfloat16
-    elif args.dtype == 'float16':
+    elif cfg['system']['infer_amp_dtype'] == 'fp16':
         AMP_DTYPE = torch.float16
     else:
-        raise ValueError(f'Unknown dtype: {args.dtype}')
+        raise ValueError(f'Unknown dtype: {cfg["system"]["infer_amp_dtype"]}')
     
     seed_everything(cfg['system']['seed'])
     
     Transformations=[
         'e', # no transformation
-        'b', #flip1
-        'ba2', # flip2
-        'a2', # flip12,
+        #'b', #flip1
+        #'ba2', # flip2
+        #'a2', # flip12,
         #'a', # rot12
         #'a3', # rot12*3
         #'ba', # flip1, rot12
@@ -217,16 +216,13 @@ if __name__ == "__main__":
 
     # Search for all .pth and .pt weight files
     model_path = Path(args.model_path)
-    weight_files = []
-    weight_files.extend(model_path.glob("**/*.pth"))
-    weight_files.extend(model_path.glob("**/*.pt"))
-    weight_paths = [[str(f) for f in weight_files]]
     
     # Search for all config files (.yml, .yaml)
-    config_files = []
-    config_files.extend(model_path.glob("**/*.yml"))
-    config_files.extend(model_path.glob("**/*.yaml"))
-    model_config_paths = [[str(f) for f in config_files]]
+    weight_paths = [[model_path / 'weights' / f'fold_{i}' / 'best.pth' for i in range(4)]]
+    model_config_paths = [[model_path / "config.yml"]*4]
+
+    weight_paths = [[weight_paths[0][0]]]
+    model_config_paths = [[model_config_paths[0][0]]]
     
     models = load_models(
         model_config_paths=model_config_paths,
