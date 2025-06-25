@@ -244,7 +244,8 @@ class PostProcessor:
             method: str = "pooling",
             method_args: dict = {},
             wbf_radius_multiplier: float = 0.0,
-            include_edge_windows: bool = True
+            include_edge_windows: bool = True,
+            device: str = 'cuda'
         ):
         """
         copick_root: CoPick root object containing particle specifications
@@ -276,7 +277,7 @@ class PostProcessor:
         # Calculate tomogram shapes and tiles per experiment from copick_root
         self.experiment_info = self._analyze_experiments()
         self.tiles_per_experiment = self.experiment_info['tiles_per_experiment']
-        self.pred_size = self.experiment_info['max_pred_size']
+        self.pred_sizes_per_experiment = self.experiment_info['pred_sizes_per_experiment']
         
         self.accumulated_data = {}
         self.predictions = {}
@@ -288,7 +289,7 @@ class PostProcessor:
         else:
             self.pred_weights = np.ones(window_size)#torch.ones(window_size, device='cuda', dtype=torch.float16)
         #self.pred_weights = 1 if not weight_center else create_weight(window_size, edge_begin = 0.25, min_weight = 0.3333)
-        self.pred_weights = torch.Tensor(self.pred_weights).cuda()
+        self.pred_weights = torch.Tensor(self.pred_weights).to(device)
 
         self.batch_size = 1
         self.to_process = []
@@ -307,7 +308,7 @@ class PostProcessor:
             if gaussian_blur_size[i] == 0:
                 self.gaussian_kernels[c] = None
                 continue
-            kernel = torch.Tensor(gaussian_kernel(gaussian_blur_sigma[i], [gaussian_blur_size[i]]*3)).cuda().half()
+            kernel = torch.Tensor(gaussian_kernel(gaussian_blur_sigma[i], [gaussian_blur_size[i]]*3)).to(device)
             kernel = kernel / kernel.sum()
             self.gaussian_kernels[c] = kernel[None, None]
 
@@ -374,6 +375,7 @@ class PostProcessor:
         return {
             'experiment_shapes': experiment_shapes,
             'tiles_per_experiment': tiles_per_exp,
+            'pred_sizes_per_experiment': experiment_shapes.copy(),  # Each experiment uses its own shape
             'max_pred_size': tuple(max_shape),
             'uniform_tiles_per_exp': len(set(tiles_per_exp.values())) == 1
         }
@@ -396,6 +398,14 @@ class PostProcessor:
     def get_tiles_count(self, experiment_id: str):
         """Get expected number of tiles for a specific experiment"""
         return self.tiles_per_experiment.get(experiment_id)
+    
+    def get_pred_size(self, experiment_id: str):
+        """Get prediction size for a specific experiment"""
+        if experiment_id in self.pred_sizes_per_experiment:
+            return self.pred_sizes_per_experiment[experiment_id]
+        else:
+            # For unknown experiments, use a default size that will be dynamically determined
+            return None
 
     def process(self, heatmap: np.ndarray, threshold: Union[float, List[float]] = 0.5, erosion: Union[int, List[int]] = 0): 
         """
@@ -404,12 +414,6 @@ class PostProcessor:
         offset: np.ndarray with shape (3, D, H, W)
         """
         class_points = {}
-        # {
-        #     class_str: {
-        #         'points': np.ndarray with shape (n, 3)
-        #         'confidence': np.ndarray with shape (n,)
-        #     }
-        # }
         for i, c in enumerate(self.classes):
             #points = hmap_to_points_ccl(heatmap[i], threshold if isinstance(threshold, float) else threshold[i])
             if self.gaussian_kernels[c] is not None:
@@ -453,18 +457,25 @@ class PostProcessor:
         accumulates the data for the past frames
         samples with new experiment_id should only be passed after all the samples with the previous experiment_id have been passed
         """
-        heatmaps = heatmaps.half()
         for i, experiment_id in enumerate(experiment_ids):
-            if experiment_id not in self.accumulated_data:
-                self.accumulated_data[experiment_id] = {
-                    'heatmaps': torch.zeros((len(self.classes), *self.pred_size), device=heatmaps.device, dtype=torch.float16),
-                    'count': torch.zeros(self.pred_size, device=heatmaps.device, dtype=torch.float16),
-                    'n_tiles': 0,
-                }
-
             heatmap = heatmaps[i]
             crop_size = heatmap.shape[1:]
             crop_origin = crop_origins[i]
+            
+            if experiment_id not in self.accumulated_data:
+                # Get prediction size for this experiment
+                pred_size = self.get_pred_size(experiment_id)
+                if pred_size is None:
+                    # For unknown experiments, calculate required size from crop
+                    pred_size = tuple(crop_origin + crop_size)
+                    # Store the dynamically determined size
+                    self.pred_sizes_per_experiment[experiment_id] = pred_size
+                
+                self.accumulated_data[experiment_id] = {
+                    'heatmaps': torch.zeros((len(self.classes), *pred_size), device=heatmaps.device, dtype=torch.float16),
+                    'count': torch.zeros(pred_size, device=heatmaps.device, dtype=torch.float16),
+                    'n_tiles': 0,
+                }
 
             self.accumulated_data[experiment_id]['heatmaps'][
                 :,
@@ -480,7 +491,7 @@ class PostProcessor:
             self.accumulated_data[experiment_id]['n_tiles'] += 1
 
             # Get experiment-specific tile count
-            expected_tiles = self.tiles_per_experiment.get(experiment_id, list(self.tiles_per_experiment.values())[0])
+            expected_tiles = self.tiles_per_experiment.get(experiment_id, 1)  # Default to 1 tile for unknown experiments
             if self.accumulated_data[experiment_id]['n_tiles'] == expected_tiles:
                 self.predictions[experiment_id] = {}
                 #if self.batch_size > 1:
