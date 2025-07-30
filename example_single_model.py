@@ -20,8 +20,9 @@ from monjudetecthm.models.mlflow_integration import ModelPackager
 
 def package_single_model():
     """Package a single trained model as MLflow model."""
-    config_path = 'configs/config_209.yml'
-    weights_path = 'results/209_resnet50d.ra2_in1k_20250116/weights/fold_0/best.pth'
+    model_dir = "models/209_resnet50d.ra2_in1k_20250116"
+    config_path = f'{model_dir}/config.yml'
+    weights_path = f'{model_dir}/weights/fold_0/best.pth'
     output_dir = 'mlflow_single_model'
     
     # Check if model files exist
@@ -66,7 +67,7 @@ def run_inference_example(model_path):
     }
     results = model.predict(model_input)
     
-    return True
+    return results
 
 
 def multi_experiment_example(model_path):
@@ -96,18 +97,11 @@ def multi_experiment_example(model_path):
 def main():
     """Main example workflow."""
     # Step 1: Package the model
-    # model_path = package_single_model()
-    # if not model_path:
-    #     return
+    model_path = package_single_model()
+    print("MlFlow model exported to:", model_path)
     model_path = 'mlflow_single_model/cryoet_single_model'  # Use pre-packaged model for demo
-    
-    # Step 2: Run inference example
-    if not run_inference_example(model_path):
-        return
-    
-    # Step 3: Demonstrate multi-experiment processing
-    if not multi_experiment_example(model_path):
-        return
+    results = run_inference_example(model_path)
+    print("Inference results:", results)
 
 
 if __name__ == "__main__":
