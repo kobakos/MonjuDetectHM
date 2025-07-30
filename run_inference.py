@@ -72,14 +72,10 @@ reverse_transformations = {
 }
 
 def infer_transformerd(model, images, transformation):
-    out = model(transformations[transformation](images))
-    if isinstance(out, tuple):
-        out = (
-            transformations[reverse_transformations[transformation]](out[0]),
-            transformations[reverse_transformations[transformation]](out[1])
-        )
-    else:
-        out = transformations[reverse_transformations[transformation]](out)
+    transformed_input = transformations[transformation](images)
+
+    out = model(transformed_input)
+    out = transformations[reverse_transformations[transformation]](out)
     
     return out
 
@@ -87,9 +83,10 @@ def infer(models, images, TTA):
     out = 0
     with torch.inference_mode():
         for model in models:
-            with torch.autocast(device_type=cfg['system']['device'], dtype=AMP_DTYPE):
-                for t in TTA:
-                    out += infer_transformerd(model, images, t).float()
+            for t in TTA:
+                with torch.autocast(device_type=cfg['system']['device'], dtype=AMP_DTYPE):
+                    out_m = infer_transformerd(model, images, t)
+                out += out_m.to(dtype=torch.float32)
         out /= len(models)
         out /= len(TTA)
     return out
@@ -104,6 +101,7 @@ def TTA_avg(models, pbar, val_df, val_index, TTA, cfg, copick_root):
         window_size=cfg['dataset']['image_size'],
         window_stride=cfg['dataset']['image_stride'],
         voxel_spacing=cfg['dataset']['voxel_spacing'],
+        selected_classes = cfg['dataset']['classes'],
         **cfg.get("postprocessing", {})
     )
     for i, (images, targets) in enumerate(pbar):
@@ -156,7 +154,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train script')
     parser.add_argument('--copick_config', type=str, help='Path to the copick config file', default='copick_config.json')
     parser.add_argument('--config', type=str, help='Path to the inference config file', default='configs/infer_config.yml')
-    parser.add_argument('--model_path', type=str, help='Path to the directory containing configs and weights', default='results/209_resnet50d.ra2_in1k_20250116')
+    parser.add_argument('--model_path', type=str, help='Path to the directory containing configs and weights', default='models/209_resnet50d.ra2_in1k_20250116')
     parser.add_argument('--detect_anomaly', action='store_true', help='Enable anomaly detection')
     parser.add_argument('--tqdm', action='store_true', help='Use tqdm')
     args = parser.parse_args()
@@ -233,6 +231,7 @@ if __name__ == "__main__":
     train_dl, val_dl = build_dataloaders(
         copick_root=copick_root,
         df=val_df,
+        val_df=val_df,
         train_index=val_index,# placeholder for train_index, not used in inference
         val_index=val_index,
         cfg=cfg,
@@ -241,7 +240,6 @@ if __name__ == "__main__":
         copick_root=copick_root
     )
     
-    val_loss_mean = 0
     if args.tqdm:
         pbar = tqdm(val_dl, desc=f'Validation', total=len(val_dl), leave=False)
     else:
@@ -260,7 +258,7 @@ if __name__ == "__main__":
 
     pred_sub_df = pred_dicts_to_df(preds)
     val_metric_mean = score(val_sub_df, pred_sub_df, distance_multiplier=0.5)
-    print(f'avg Validation Loss: {val_loss_mean: .5e}, avg Validation Metric: {val_metric_mean: .5f}')
+    print(f'avg Validation Metric: {val_metric_mean: .5f}')
     print()
     del models
     torch.cuda.empty_cache()

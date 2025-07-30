@@ -134,9 +134,7 @@ class ModelPackager:
         return artifacts
         
     def package_model(self, 
-                     model_name: Optional[str] = None,
-                     mlflow_tracking: bool = False,
-                     experiment_name: Optional[str] = None) -> str:
+                     model_name: Optional[str] = None):
         """
         Package model(s) as MLflow model.
         
@@ -177,25 +175,6 @@ class ModelPackager:
             input_example=input_example,
             signature=None  # Will be inferred from input_example
         )
-        
-        # Log to MLflow tracking if requested
-        if mlflow_tracking:
-            if experiment_name:
-                mlflow.set_experiment(experiment_name)
-                
-            with mlflow.start_run():
-                # Log model artifacts
-                mlflow.log_artifacts(model_path, "model")
-                
-                # Log model metadata
-                mlflow.log_param("model_type", "ensemble" if self.ensemble_mode else "single")
-                mlflow.log_param("num_models", len(self.config_paths))
-                
-                # Log model configs as artifacts
-                for i, config_path in enumerate(self.config_paths):
-                    with open(config_path, 'r') as f:
-                        config = yaml.safe_load(f)
-                    mlflow.log_dict(config, f"config_{i}.yml")
                     
         print(f"✅ Model {'ensemble' if self.ensemble_mode else ''} packaged successfully at: {model_path}")
         return model_path

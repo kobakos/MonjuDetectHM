@@ -245,7 +245,8 @@ class PostProcessor:
             method_args: dict = {},
             wbf_radius_multiplier: float = 0.0,
             include_edge_windows: bool = True,
-            device: str = 'cuda'
+            device: str = 'cuda',
+            selected_classes: Optional[List[str]] = None
         ):
         """
         copick_root: CoPick root object containing particle specifications
@@ -259,7 +260,15 @@ class PostProcessor:
         self.include_edge_windows = include_edge_windows
         
         # Extract classes and particle radius from CoPick configuration
-        self.classes = [p.name for p in self.copick_root.pickable_objects if p.is_particle]
+        available_classes = [p.name for p in self.copick_root.pickable_objects if p.is_particle]
+        if selected_classes is not None:
+            # Validate that selected classes exist in copick config
+            invalid_classes = [cls for cls in selected_classes if cls not in available_classes]
+            if invalid_classes:
+                raise ValueError(f"Selected classes {invalid_classes} not found in copick config. Available: {available_classes}")
+            self.classes = selected_classes
+        else:
+            self.classes = available_classes
         self.particle_radius = {p.name: p.radius for p in self.copick_root.pickable_objects if p.is_particle}
         
         # Auto-detect voxel spacing if not provided
@@ -472,8 +481,8 @@ class PostProcessor:
                     self.pred_sizes_per_experiment[experiment_id] = pred_size
                 
                 self.accumulated_data[experiment_id] = {
-                    'heatmaps': torch.zeros((len(self.classes), *pred_size), device=heatmaps.device, dtype=torch.float16),
-                    'count': torch.zeros(pred_size, device=heatmaps.device, dtype=torch.float16),
+                    'heatmaps': torch.zeros((len(self.classes), *pred_size), device=heatmaps.device, dtype=heatmaps.dtype),
+                    'count': torch.zeros(pred_size, device=heatmaps.device, dtype=heatmaps.dtype),
                     'n_tiles': 0,
                 }
 

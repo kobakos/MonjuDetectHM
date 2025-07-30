@@ -111,7 +111,8 @@ class CryoETMLflowModel(PythonModel):
             state_dict = torch.load(weights_file, map_location=self.device)
             
             # Handle compiled model weights
-            if '_orig_mod.segmentation_head.weight' in state_dict:
+            
+            if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
                 state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
                 
             model.load_state_dict(state_dict)
@@ -132,6 +133,7 @@ class CryoETMLflowModel(PythonModel):
                 - 'copick_root': CoPick root object containing tomogram data
                 - 'experiment_id': Optional experiment ID to process (if None, processes all experiments)
                 - 'threshold': Optional detection thresholds per class
+                - 'voxel_spacing': Optional voxel spacing override (if None, uses config value)
                 
         Returns:
             Dictionary with particle detections aggregated across all processed crops
@@ -145,18 +147,21 @@ class CryoETMLflowModel(PythonModel):
         # Extract parameters from model_input
         copick_root = model_input.get('copick_root')
         experiment_id = model_input.get('experiment_id')
+        voxel_spacing = model_input.get('voxel_spacing')
         threshold = model_input.get('threshold')
+
         
         if copick_root is None:
             raise ValueError("'copick_root' must be provided in model_input")
         
         # Use the first model's config for dataset and postprocessing settings
         base_cfg = self.model_configs[0]
+        voxel_spacing = base_cfg['dataset']['voxel_spacing'] if voxel_spacing is None else voxel_spacing
         
         # Generate sliding window index for all experiments
         df = generate_sliding_window_index(
             copick_root=copick_root,
-            voxel_spacing=base_cfg['dataset']['voxel_spacing'],
+            voxel_spacing=voxel_spacing,
             image_size=base_cfg['dataset']['image_size'],
             image_stride=base_cfg['dataset']['image_stride'],
             include_edge_windows=True
@@ -198,6 +203,7 @@ class CryoETMLflowModel(PythonModel):
             window_size=base_cfg['dataset']['image_size'],
             window_stride=base_cfg['dataset']['image_stride'], 
             voxel_spacing=base_cfg['dataset']['voxel_spacing'],
+            selected_classes=base_cfg['dataset']['classes'],
             **postprocessing_cfg
         )
         

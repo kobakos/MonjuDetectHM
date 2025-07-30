@@ -161,7 +161,8 @@ class CropDataset(Dataset):
             # input preprocessor
             rescale_factor: float = 1e5, clip_percentile=(0.1, 99.9), standardize=False,
             # target generator
-            kernel_size_multiplier: int = 7, kernel_sigma_multiplier: float = 0.5
+            kernel_size_multiplier: int = 7, kernel_sigma_multiplier: float = 0.5,
+            selected_classes: Optional[List[str]] = None
         ):
         self.copick_root = copick_root
         self.df = df
@@ -172,7 +173,15 @@ class CropDataset(Dataset):
 
         # Initialize caches and copick-derived attributes
         self.points_cache = {}
-        self.classes = [p.name for p in self.copick_root.pickable_objects if p.is_particle]
+        # Use selected classes if provided, otherwise use all available classes from copick
+        available_classes = [p.name for p in self.copick_root.pickable_objects if p.is_particle]
+        if selected_classes is not None:
+            invalid_classes = [cls for cls in selected_classes if cls not in available_classes]
+            if invalid_classes:
+                raise ValueError(f"Selected classes {invalid_classes} not found in copick config. Available: {available_classes}")
+            self.classes = selected_classes
+        else:
+            self.classes = available_classes
         self.particle_radius = {p.name: p.radius for p in self.copick_root.pickable_objects if p.is_particle}
         # print(self.particle_radius, self.classes) # Kept for debugging if needed
 
@@ -228,7 +237,7 @@ class CropDataset(Dataset):
         # Load tomogram from copick
         run = self.copick_root.get_run(run_name)
         voxel_spacing_obj = run.get_voxel_spacing(entry['voxel_spacing'])
-        tomogram = voxel_spacing_obj.tomograms[0]
+        tomogram = [t for t in voxel_spacing_obj.tomograms if t.static_path.endswith('denoised.zarr')][0]
         # arr is not fully loaded into ram yet
         image = zarr.open(tomogram.zarr(), 'r')['0']
 
@@ -390,6 +399,7 @@ def build_dataloaders(
         do_augmentation = True,
         augmentation_args = cfg['augmentation_args'],
         aurgementation_probabilities = cfg['augmentation_probabilities'],
+        selected_classes = cfg['dataset']['classes'],
     )
     val_ds = CropDataset(
         copick_root = copick_root,
@@ -399,6 +409,7 @@ def build_dataloaders(
         image_size = cfg['dataset']['image_size'],
         return_targets = True,
         do_augmentation = False,  # No augmentation for validation
+        selected_classes = cfg['dataset']['classes'],
     )
     train_dataloader = torch.utils.data.DataLoader(
         train_ds,

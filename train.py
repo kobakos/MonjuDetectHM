@@ -24,17 +24,14 @@ from monjudetecthm.models import build_model_from_config
 from monjudetecthm.models.postprocessing import PostProcessor
 from monjudetecthm.evaluation import score, pred_dicts_to_df, generate_gt_sub_df
 from monjudetecthm.losses import from_cfg
-from monjudetecthm.logger import Logger, EmaCalculator
 
-def train_single_fold(fold, train_dl, val_dl, val_df, val_index, val_sub_df, cfg, copick_root):
+def train_single_fold(fold, train_dl, val_dl, val_df, val_index, val_sub_df, cfg, copick_root, model_save_dir):
     print(f'============================================start of training=============================================')
     # create model and whatnot
     model = build_model_from_config(cfg['model'])
     print(f"Model parameter count: {sum(p.numel() for p in model.parameters())}")
     optimizer = create_optimizer(cfg['optimizer'], model.parameters())
     scheduler = create_scheduler(cfg['scheduler'], optimizer)
-    if log:
-        logger.reset_best_metric()
     criterion = from_cfg(cfg['criterion'])
     val_criterion = criterion
     post_processor = PostProcessor(
@@ -42,12 +39,13 @@ def train_single_fold(fold, train_dl, val_dl, val_df, val_index, val_sub_df, cfg
         window_size=cfg['dataset']['image_size'], 
         window_stride=cfg['dataset']['image_stride'],
         voxel_spacing=cfg['dataset']['voxel_spacing'],
+        selected_classes=cfg['dataset']['classes'],
         **cfg["postprocessing"]
     )
     
     # main training loop
-    loss_ema = EmaCalculator(cfg['system']['loss_alpha'])
     best_val_loss = 1e6
+    best_val_metric = 0
     for epoch in range(cfg['train_loop']['n_epochs']):
         # training loop
         model.train()
@@ -65,7 +63,6 @@ def train_single_fold(fold, train_dl, val_dl, val_df, val_index, val_sub_df, cfg
 
             # update various loss metrics
             all_losses_mean = (all_losses_mean * i + loss.item()) / (i + 1)
-            loss_ema.update(loss.item())
 
             loss.backward()
             if cfg['train_loop']['max_grad_norm'] > 0:
@@ -80,22 +77,14 @@ def train_single_fold(fold, train_dl, val_dl, val_df, val_index, val_sub_df, cfg
             else:
                 scheduler.step()
 
-            if i % cfg['system']['log_freq'] == 0 and log:
-                logger.log({
-                    'epoch': epoch,
-                    'batch': i,
-                    'train_loss': loss.item(),
-                    'train_loss_ema': loss_ema.ema,
-                    'train_step': epoch * len(train_dl) + i})
             if args.tqdm:          
                 pbar.set_postfix(OrderedDict(
                     loss = loss.item(),
-                    loss_ema = loss_ema.ema,
                     loss_mean = all_losses_mean
                 ))
             if args.sanity_check:
                 break
-        print(f'Epoch: {epoch}, Loss_ema: {loss_ema.ema: .5e}, Loss_mean: {all_losses_mean: .5e}')
+        print(f'Epoch: {epoch}, Loss_mean: {all_losses_mean: .5e}')
         if args.tqdm:
             pbar.close()
         model.eval()
@@ -130,32 +119,23 @@ def train_single_fold(fold, train_dl, val_dl, val_df, val_index, val_sub_df, cfg
         if args.tqdm:
             pbar.close()
         best_val_loss = min(best_val_loss, val_loss_mean)
+        best_val_metric = max(best_val_metric, val_metric_mean)
             
         print(f'Epoch: {epoch}, avg Validation Loss: {val_loss_mean: .5e}, avg Validation Metric: {val_metric_mean: .5f}')
-        if log:
-            values_to_log = {
-                'fold': fold,
-                'epoch': epoch,
-                'avg_val_loss': val_loss_mean,
-                'avg_val_metric': val_metric_mean,
-                'avg_train_loss': all_losses_mean,
-            }
-            logger.log(values_to_log)
-            save_by = cfg.get('save_by', 'val_metric')
-            if save_by == 'val_metric':
-                logger.update_best_metric(val_metric_mean, mode='max')
-            elif save_by == 'val_loss':
-                logger.update_best_metric(val_loss_mean, mode='min')
-            else:
-                raise ValueError(f'Unknown save_by: {save_by}')
-            #if epoch == cfg['n_epochs'] - 1:
-            logger.save_model(model, fold, epoch, best_only=True)
-            if best_val_loss == val_loss_mean: 
-                os.makedirs(f'../experiments/{logger.iteration_name}/weights/fold_{fold}', exist_ok=True)
-                torch.save(model.state_dict(), f'../experiments/{logger.iteration_name}/weights/fold_{fold}/best_val_loss.pth')
-            if logger.early_stop(patience=cfg['train_loop']['early_stop_patience']):
-                print(f'Early stopping at epoch {epoch}')
-                break
+        # Save model if it's the best so far
+        save_by = cfg.get('save_by', 'val_metric')
+        save_model = False
+        if save_by == 'val_metric' and val_metric_mean >= best_val_metric:
+            save_model = True
+        elif save_by == 'val_loss' and val_loss_mean <= best_val_loss:
+            save_model = True
+        
+        if save_model:
+            fold_dir = os.path.join(model_save_dir, 'cryoet_detection_model', f'fold_{fold}')
+            os.makedirs(fold_dir, exist_ok=True)
+            model_save_path = os.path.join(fold_dir, 'best.pth')
+            torch.save(model.state_dict(), model_save_path)
+            print(f'Saved best model to {model_save_path}')
         print()
         if args.sanity_check:
             break
@@ -175,9 +155,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train script')
     parser.add_argument('--config', type=str, help='Path to the config file (in json)', default='configs/config.yml')
     parser.add_argument('--detect_anomaly', action='store_true', help='Enable anomaly detection')
-    parser.add_argument('--log', action='store_true', help='Enable logging')
     parser.add_argument('--tqdm', action='store_true', help='Use tqdm')
-    parser.add_argument('--disable-wandb', action='store_true', help='Disable wandb')
     parser.add_argument('--sanity_check', action='store_true', help='Run sanity check with short steps/epochs')
     parser.add_argument('--model_save_dir', type=str, default='results', help='Directory to save models')
     parser.add_argument('--copick_config_path', type=str, default='copick_config.json', help='Path to the CoPick config file')
@@ -205,19 +183,22 @@ if __name__ == '__main__':
     elif cfg["system"]['infer_amp_dtype'] == 'fp32':
         INFER_AMP_DTYPE = torch.float32
 
-    log = args.log
-    if log:
-        logger = Logger(cfg, args.model_save_dir, args.disable_wandb, metric_init=0 if cfg.get('save_by', 'val_metric') == 'val_metric' else 1e6) # MODIFIED: use args
 
     if args.detect_anomaly:
         torch.autograd.set_detect_anomaly(True)
 
     seed_everything(cfg['system']['seed'])
 
-    log_freq = cfg['system']['log_freq']
+    # Save config file
+    model_dir = os.path.join(args.model_save_dir, 'cryoet_detection_model')
+    os.makedirs(model_dir, exist_ok=True)
+    config_save_path = os.path.join(model_dir, 'config.yml')
+    with open(config_save_path, 'w') as f:
+        yaml.dump(cfg, f)
+    print(f'Saved config to {config_save_path}')
 
     # generate copick_root object
-    assert args.copick_config_path or args.dataset_id, "Either --copick_config_path or --dataset_id must be provided"
+    assert args.copick_config_path, "copick_config_path must be provided"
     copick_root = copick.from_file(args.copick_config_path)
 
     gt_sub_df = generate_gt_sub_df(
@@ -264,5 +245,6 @@ if __name__ == '__main__':
         val_index=val_index,
         val_sub_df=gt_sub_df[gt_sub_df['experiment'].isin(folds[0])],
         cfg=cfg,
-        copick_root=copick_root
+        copick_root=copick_root,
+        model_save_dir=args.model_save_dir
     )
