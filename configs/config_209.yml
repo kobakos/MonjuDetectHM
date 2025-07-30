@@ -77,6 +77,12 @@ dataset:
   kernel_size_multiplier: 7
   rescale_factor: 100000
   resolution_hierarchy: 0
+  classes:
+  - apo-ferritin
+  - beta-galactosidase
+  - ribosome
+  - thyroglobulin
+  - virus-like-particle
 metric:
   name: bce
 model:
