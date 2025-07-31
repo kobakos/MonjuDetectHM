@@ -21,20 +21,11 @@ from monjudetecthm.models.mlflow_integration import ModelPackager
 def package_single_model():
     """Package a single trained model as MLflow model."""
     model_dir = "models/209_resnet50d.ra2_in1k_20250116"
-    config_path = f'{model_dir}/config.yml'
-    weights_path = f'{model_dir}/weights/fold_0/best.pth'
     output_dir = 'mlflow_single_model'
-    
-    # Check if model files exist
-    if not Path(config_path).exists():
-        return None
-    if not Path(weights_path).exists():
-        return None
     
     # Create packager
     packager = ModelPackager(
-        model_config_path=config_path,
-        model_weights_path=weights_path,
+        model_dir=model_dir,
         output_dir=output_dir
     )
     
@@ -76,22 +67,14 @@ def multi_experiment_example(model_path):
     import copick
     copick_root = copick.from_file('copick_config.json')
     
-    if len(copick_root.runs) < 2:
-        experiment_id = copick_root.runs[0].name
-        model_input = {
-            'copick_root': copick_root,
-            'experiment_id': experiment_id
-        }
-        results = model.predict(model_input)
-    else:
-        # Process all experiments at once (experiment_id=None)
-        model_input = {
-            'copick_root': copick_root,
-            'experiment_id': None
-        }
-        results = model.predict(model_input)
+    # Process all experiments at once (experiment_id=None)
+    model_input = {
+        'copick_root': copick_root,
+        'experiment_id': None
+    }
+    results = model.predict(model_input)
     
-    return True
+    return results
 
 
 def main():

@@ -24,34 +24,19 @@ def package_ensemble_model():
     
     # Define models to ensemble with their configs and weights
     models = [
-        {'dir': '209_resnet50d.ra2_in1k_20250116'},
-        {'dir': '249_tf_efficientnetv2_m.in21k_ft_in1k_20250125'},
-        {'dir': '265_resnet50d.ra2_in1k_20250130'},
+        '209_resnet50d.ra2_in1k_20250116',
+        '249_tf_efficientnetv2_m.in21k_ft_in1k_20250125',
+        '265_resnet50d.ra2_in1k_20250130'
     ]
     
     # Collect available model weights
-    config_paths = []
-    weights_paths = []
-    
+    model_dir = []
     for model in models:
-        weights_path = f'models/{model["dir"]}/weights/fold_0/best.pth'
-        config_path = f'models/{model["dir"]}/config.yml'
-        
-        if Path(weights_path).exists() and Path(config_path).exists():
-            config_paths.append(config_path)
-            weights_paths.append(weights_path)
-            print(f"Found model: {model['dir']}")
-        else:
-            raise FileNotFoundError(f"Missing model files for {model['dir']}: {weights_path} or {config_path}")
-    
-    print(f"Found {len(weights_paths)} models for ensemble")
-    if len(weights_paths) < 2:
-        raise ValueError(f"Need at least 2 models for ensemble, found {len(weights_paths)}")
+        model_dir.append(f'models/{model}')
     
     # Create ensemble packager
     packager = ModelPackager(
-        model_config_paths=config_paths,
-        model_weights_paths=weights_paths,
+        model_dir = model_dir,
         output_dir='mlflow_ensemble_model'
     )
     

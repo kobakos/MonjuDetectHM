@@ -1,7 +1,6 @@
 """
 MLflow wrapper model for CryoET particle detection with ensemble support.
 """
-
 import os
 import yaml
 import torch
@@ -11,9 +10,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Union, Any
 from pathlib import Path
 
-import mlflow
 from mlflow.pyfunc import PythonModel
-import copick
 
 from monjudetecthm.models.models import build_model_from_config
 from monjudetecthm.models.postprocessing import PostProcessor
@@ -44,82 +41,51 @@ class CryoETMLflowModel(PythonModel):
             context: MLflow context containing model artifacts
         """
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Load model configurations
-        config_files = []
-        if 'config_file' in context.artifacts:
-            # Single model
-            config_files = [context.artifacts['config_file']]
-        else:
-            # Ensemble - look for numbered config files
-            config_files = []
-            i = 0
-            while f'config_file_{i}' in context.artifacts:
-                config_files.append(context.artifacts[f'config_file_{i}'])
-                i += 1
-        
-        if not config_files:
-            raise ValueError("No configuration files found in MLflow artifacts")
-            
-        # Load model weights
-        weights_files = []
-        if 'model_weights' in context.artifacts:
-            # Single model
-            weights_files = [context.artifacts['model_weights']]
-        else:
-            # Ensemble - look for numbered weight files
-            weights_files = []
-            i = 0
-            while f'model_weights_{i}' in context.artifacts:
-                weights_files.append(context.artifacts[f'model_weights_{i}'])
-                i += 1
-                
-        if not weights_files:
-            raise ValueError("No model weight files found in MLflow artifacts")
-            
-        if len(config_files) != len(weights_files):
-            raise ValueError(f"Mismatch between config files ({len(config_files)}) and weight files ({len(weights_files)})")
-            
-        # Set ensemble mode
-        self.ensemble_mode = len(config_files) > 1
-        
-        # Load models
         self.models = []
-        self.model_configs = []
-        
-        for config_file, weights_file in zip(config_files, weights_files):
-            # Load configuration
-            with open(config_file, 'r') as f:
+
+        # Find all config and weight files in the artifacts by their prefix
+        model_dir_keys = [k for k in context.artifacts.keys() if k.startswith('model_dir_')]
+        model_dirs = [context.artifacts[k] for k in model_dir_keys]
+
+        self.config_paths = []
+        self.weights_paths = []
+        for d in model_dirs:
+            n_folds = len(os.listdir(f'{d}/weights'))
+            self.config_paths.append(f'{d}/config.yml')
+            self.weights_paths.append([f'{d}/weights/fold_{i}/best.pth' for i in range(n_folds)])
+
+        for config_path, weights_path in zip(self.config_paths, self.weights_paths):
+            with open(config_path, "r") as f:
                 cfg = yaml.safe_load(f)
-            
             model_cfg = cfg['model'].copy()
-            
-            # Remove EMA and pretrained settings for inference
+
             if 'ema' in model_cfg:
                 del model_cfg['ema']
             model_cfg['pretrained'] = False
             if 'pretrain_weight_path' in model_cfg:
                 del model_cfg['pretrain_weight_path']
-            
-            # Set device
             model_cfg['device'] = self.device
-            
-            # Build model
             model = build_model_from_config(model_cfg)
-            
-            # Load weights
-            state_dict = torch.load(weights_file, map_location=self.device)
-            
-            # Handle compiled model weights
-            
-            if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
-                state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-                
+
+            state_dicts = []
+            for wp in weights_path:
+                state_dict = torch.load(wp, map_location=self.device)
+                if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+                    state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+                state_dicts.append(state_dict)
+            # weight averaging
+            if len(state_dicts) > 1:
+                state_dict = {k: sum(sd[k] for sd in state_dicts) / len(state_dicts) for k in state_dicts[0].keys()}
+            else:
+                state_dict = state_dicts[0]
+
             model.load_state_dict(state_dict)
             model.eval()
-            
+
             self.models.append(model)
             self.model_configs.append(cfg)
+
+        self.ensemble_mode = len(self.models) > 1
             
         print(f"Loaded {'ensemble of ' + str(len(self.models)) + ' models' if self.ensemble_mode else 'single model'} on {self.device}")
         
