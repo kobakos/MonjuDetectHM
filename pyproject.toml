@@ -23,8 +23,3 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["monjudetecthm*"]
-
-[tool.setuptools]
-package-dir = {"" = "."}
