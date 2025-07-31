@@ -144,7 +144,7 @@ class CryoETMLflowModel(PythonModel):
             copick_root=copick_root,
             df=df,
             index=np.arange(len(df)),  # Use all indices
-            voxel_spacing=base_cfg['dataset']['voxel_spacing'],
+            voxel_spacing=voxel_spacing,
             image_size=base_cfg['dataset']['image_size'],
             return_targets=False,  # Inference only
             do_augmentation=False,  # No augmentation for inference
@@ -168,7 +168,7 @@ class CryoETMLflowModel(PythonModel):
             copick_root=copick_root,
             window_size=base_cfg['dataset']['image_size'],
             window_stride=base_cfg['dataset']['image_stride'], 
-            voxel_spacing=base_cfg['dataset']['voxel_spacing'],
+            voxel_spacing=voxel_spacing,
             selected_classes=base_cfg['dataset']['classes'],
             **postprocessing_cfg
         )
