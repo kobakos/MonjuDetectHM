@@ -22,4 +22,5 @@ dependencies = [
     "zarr>=2.18.3",
 ]
 
-[tool.setuptools.packages.find]
+[tool.setuptools]
+packages = ["monjudetecthm"]
